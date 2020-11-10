@@ -1,9 +1,9 @@
-﻿using Jackett.Common.Models.Config;
+using System;
+using Jackett.Common.Models.Config;
 using Jackett.Common.Services.Interfaces;
 using Jackett.Common.Utils;
 using Jackett.Server.Services;
 using NLog;
-using System;
 
 namespace Jackett.Server
 {
@@ -11,36 +11,26 @@ namespace Jackett.Server
     {
         public static void ProcessSettings(RuntimeSettings runtimeSettings, Logger logger)
         {
-            if (runtimeSettings.ClientOverride != "httpclient" && runtimeSettings.ClientOverride != "httpclient2" && runtimeSettings.ClientOverride != "httpclientnetcore")
+            if (runtimeSettings.ClientOverride != "httpclient" && runtimeSettings.ClientOverride != "httpclient2")
             {
-                logger.Error($"Client override ({runtimeSettings.ClientOverride}) has been deprecated, please remove it from your start arguments");
+                logger.Error($"Client override ({runtimeSettings.ClientOverride}) has been deprecated, please remove it from your start arguments.");
                 Environment.Exit(1);
             }
 
             if (runtimeSettings.LogRequests)
-            {
                 logger.Info("Logging enabled.");
-            }
 
             if (runtimeSettings.TracingEnabled)
-            {
                 logger.Info("Tracing enabled.");
-            }
 
             if (runtimeSettings.IgnoreSslErrors == true)
-            {
-                logger.Error($"The IgnoreSslErrors option has been deprecated, please remove it from your start arguments");
-            }
+                logger.Info("Ignore SSL errors enabled.");
 
             if (!string.IsNullOrWhiteSpace(runtimeSettings.CustomDataFolder))
-            {
                 logger.Info("Jackett Data will be stored in: " + runtimeSettings.CustomDataFolder);
-            }
 
             if (runtimeSettings.ProxyConnection != null)
-            {
-                logger.Info("Proxy enabled. " + runtimeSettings.ProxyConnection);
-            }
+                logger.Info("Proxy enabled: " + runtimeSettings.ProxyConnection);
         }
 
         public static void ProcessWindowsSpecificArgs(ConsoleOptions consoleOptions, IProcessService processService, ServerConfig serverConfig, Logger logger)
@@ -105,7 +95,7 @@ namespace Jackett.Server
             // Override port
             if (consoleOptions.Port != 0)
             {
-                Int32.TryParse(serverConfig.Port.ToString(), out Int32 configPort);
+                int.TryParse(serverConfig.Port.ToString(), out var configPort);
 
                 if (configPort != consoleOptions.Port)
                 {

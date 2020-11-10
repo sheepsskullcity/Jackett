@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.Serialization;
 using Jackett.Common.Indexers;
@@ -43,7 +43,7 @@ namespace Jackett.Common.Models.DTO
 
         public Indexer(IIndexer indexer)
         {
-            id = indexer.ID;
+            id = indexer.Id;
             name = indexer.DisplayName;
             description = indexer.DisplayDescription;
             type = indexer.Type;
@@ -51,19 +51,16 @@ namespace Jackett.Common.Models.DTO
             site_link = indexer.SiteLink;
             language = indexer.Language;
             last_error = indexer.LastError;
-            potatoenabled = indexer.TorznabCaps.Categories.Any(i => TorznabCatType.Movies.Contains(i));
+            potatoenabled = indexer.TorznabCaps.Categories.GetTorznabCategoryTree().Any(i => TorznabCatType.Movies.Contains(i));
 
             alternativesitelinks = indexer.AlternativeSiteLinks;
 
-            caps = indexer.TorznabCaps.Categories
-                .GroupBy(p => p.ID)
-                .Select(g => g.First())
-                .OrderBy(c => c.ID < 100000 ? "z" + c.ID.ToString() : c.Name)
+            caps = indexer.TorznabCaps.Categories.GetTorznabCategoryList(true)
                 .Select(c => new Capability
-            {
-                ID = c.ID.ToString(),
-                Name = c.Name
-            });
+                {
+                    ID = c.ID.ToString(),
+                    Name = c.Name
+                });
         }
     }
 }

@@ -1,16 +1,15 @@
-﻿using CommandLine;
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using CommandLine;
 using CommandLine.Text;
 using Jackett.Common.Models.Config;
 using Jackett.Common.Services;
 using Jackett.Common.Services.Interfaces;
 using Jackett.Common.Utils;
 using NLog;
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Reflection;
 
 namespace Jackett.Updater
 {
@@ -18,16 +17,18 @@ namespace Jackett.Updater
     {
         private IProcessService processService;
         private IServiceConfigService windowsService;
-        private Logger logger;
+        public static Logger logger;
+        private Variants.JackettVariant variant = Variants.JackettVariant.NotFound;
 
         public static void Main(string[] args)
         {
+            AppDomain.CurrentDomain.UnhandledException += UnhandledExceptionTrapper;
             new Program().Run(args);
         }
 
         private void Run(string[] args)
         {
-            RuntimeSettings runtimeSettings = new RuntimeSettings()
+            var runtimeSettings = new RuntimeSettings()
             {
                 CustomLogFileName = "updater.txt"
             };
@@ -38,14 +39,18 @@ namespace Jackett.Updater
             logger.Info("Jackett Updater v" + GetCurrentVersion());
             logger.Info("Options \"" + string.Join("\" \"", args) + "\"");
 
-            bool isWindows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            var variants = new Variants();
+            variant = variants.GetVariant();
+            logger.Info("Jackett variant: " + variant.ToString());
+
+            var isWindows = Environment.OSVersion.Platform == PlatformID.Win32NT;
             if (isWindows)
             {
                 //The updater starts before Jackett closes
                 logger.Info("Pausing for 3 seconds to give Jackett & tray time to shutdown");
                 System.Threading.Thread.Sleep(3000);
             }
-        
+
             processService = new ProcessService(logger);
             windowsService = new WindowsServiceConfigService(processService, logger);
 
@@ -63,12 +68,13 @@ namespace Jackett.Updater
                 {
                     logger.Error(HelpText.AutoBuild(optionsResult));
                     logger.Error("Failed to process update arguments!");
+                    logger.Error(errors.ToString());
                     Console.ReadKey();
                 });
             }
             catch (Exception e)
             {
-                logger.Error(e, "Exception applying update!");
+                logger.Error($"Exception applying update!\n{e}");
             }
         }
 
@@ -94,36 +100,35 @@ namespace Jackett.Updater
                     {
                         try
                         {
-                            var startInfo = new ProcessStartInfo();
-                            startInfo.Arguments = "-15 " + pid;
-                            startInfo.FileName = "kill";
+                            var startInfo = new ProcessStartInfo
+                            {
+                                Arguments = "-15 " + pid,
+                                FileName = "kill"
+                            };
                             Process.Start(startInfo);
                             System.Threading.Thread.Sleep(1000); // just sleep, WaitForExit() doesn't seem to work on mono/linux (returns immediantly), https://bugzilla.xamarin.com/show_bug.cgi?id=51742
                             exited = proc.WaitForExit(2000);
                         }
                         catch (Exception e)
                         {
-                            logger.Error(e, "Error while sending SIGTERM to " + pid.ToString());
+                            logger.Error($"Error while sending SIGTERM to {pid}\n{e}");
                         }
                         if (!exited)
-                            logger.Info("Process " + pid.ToString() + " didn't exit within 2 seconds after a SIGTERM");
+                            logger.Info($"Process {pid} didn't exit within 2 seconds after a SIGTERM");
                     }
                     if (!exited)
-                    {
                         proc.Kill(); // send SIGKILL
-                    }
                     exited = proc.WaitForExit(5000);
                     if (!exited)
-                        logger.Info("Process " + pid.ToString() + " didn't exit within 5 seconds after a SIGKILL");
+                        logger.Info($"Process {pid} didn't exit within 5 seconds after a SIGKILL");
                 }
                 catch (ArgumentException)
                 {
-                    logger.Info("Process " + pid.ToString() + " is already dead");
+                    logger.Info($"Process {pid} is already dead");
                 }
                 catch (Exception e)
                 {
-                    logger.Info("Error killing process " + pid.ToString());
-                    logger.Info(e);
+                    logger.Error($"Error killing process {pid}\n{e}");
                 }
             }
         }
@@ -132,9 +137,7 @@ namespace Jackett.Updater
         {
             var updateLocation = GetUpdateLocation();
             if (!(updateLocation.EndsWith("\\") || updateLocation.EndsWith("/")))
-            {
                 updateLocation += Path.DirectorySeparatorChar;
-            }
 
             var pids = new int[] { };
             if (options.KillPids != null)
@@ -148,56 +151,87 @@ namespace Jackett.Updater
             var trayProcesses = Process.GetProcessesByName("JackettTray");
             if (isWindows)
             {
-                if (trayProcesses.Count() > 0)
-                {
+                if (trayProcesses.Length > 0)
                     foreach (var proc in trayProcesses)
-                    {
                         try
                         {
-                            logger.Info("Killing tray process " + proc.Id);
+                            logger.Info($"Killing tray process {proc.Id}");
                             proc.Kill();
                             trayRunning = true;
                         }
-                        catch { }
-                    }
-                }
+                        catch (Exception e)
+                        {
+                            logger.Error(e);
+                        }
 
                 // on unix we don't have to wait (we can overwrite files which are in use)
                 // On unix we kill the PIDs after the update so e.g. systemd can automatically restart the process
                 KillPids(pids);
             }
-            logger.Info("Finding files in: " + updateLocation);
-            var files = Directory.GetFiles(updateLocation, "*.*", SearchOption.AllDirectories);
-            foreach (var file in files)
-            {
-                var fileName = Path.GetFileName(file).ToLowerInvariant();
 
-                if (fileName.EndsWith(".zip") ||
-                    fileName.EndsWith(".tar") ||
-                    fileName.EndsWith(".gz"))
+            var variants = new Variants();
+            if (variants.IsNonWindowsDotNetCoreVariant(variant))
+            {
+                // On Linux you can't modify an executable while it is executing
+                // https://github.com/Jackett/Jackett/issues/5022
+                // https://stackoverflow.com/questions/16764946/what-generates-the-text-file-busy-message-in-unix#comment32135232_16764967
+                // Delete the ./jackett executable
+                // pdb files are also problematic https://github.com/Jackett/Jackett/issues/5167#issuecomment-489301150
+
+                var jackettExecutable = options.Path.TrimEnd('/') + "/jackett";
+                var pdbFiles = Directory.EnumerateFiles(options.Path, "*.pdb", SearchOption.AllDirectories).ToList();
+                var removeList = pdbFiles;
+                removeList.Add(jackettExecutable);
+
+                foreach (var fileForDelete in removeList)
                 {
-                    continue;
-                }
-                try
-                {
-                    logger.Info("Copying " + fileName);
-                    var dest = Path.Combine(options.Path, file.Substring(updateLocation.Length));
-                    var destDir = Path.GetDirectoryName(dest);
-                    if (!Directory.Exists(destDir))
+                    try
                     {
-                        logger.Info("Creating directory " + destDir);
-                        Directory.CreateDirectory(destDir);
+                        logger.Info("Attempting to remove: " + fileForDelete);
+
+                        if (File.Exists(fileForDelete))
+                        {
+                            File.Delete(fileForDelete);
+                            logger.Info("Deleted " + fileForDelete);
+                        }
+                        else
+                            logger.Info("File for deleting not found: " + fileForDelete);
                     }
-                    File.Copy(file, dest, true);
-                }
-                catch (Exception e)
-                {
-                    logger.Error(e);
+                    catch (Exception e)
+                    {
+                        logger.Error(e);
+                    }
                 }
             }
 
+            logger.Info("Finding files in: " + updateLocation);
+            var files = Directory.GetFiles(updateLocation, "*.*", SearchOption.AllDirectories).OrderBy(x => x).ToList();
+            logger.Info($"{files.Count} update files found");
+
+            try
+            {
+                foreach (var file in files)
+                {
+                    var fileName = Path.GetFileName(file).ToLowerInvariant();
+
+                    if (fileName.EndsWith(".zip") || fileName.EndsWith(".tar") || fileName.EndsWith(".gz"))
+                        continue;
+
+                    var fileCopySuccess = CopyUpdateFile(options.Path, file, updateLocation, false);
+
+                    if (!fileCopySuccess) //Perform second attempt, this time removing the target file first
+                        CopyUpdateFile(options.Path, file, updateLocation, true);
+                }
+            }
+            catch (Exception e)
+            {
+                logger.Error(e);
+            }
+
+            logger.Info("File copying complete");
+
             // delete old dirs
-            string[] oldDirs = new string[] { "Content/logos" };
+            var oldDirs = new string[] { "Content/logos" };
 
             foreach (var oldDir in oldDirs)
             {
@@ -217,69 +251,188 @@ namespace Jackett.Updater
             }
 
             // delete old files
-            string[] oldFiles = new string[] {
+            var oldFiles = new string[] {
+                "appsettings.Development.json",
+                "Autofac.Integration.WebApi.dll",
+                "Content/congruent_outline.png",
+                "Content/crissXcross.png",
                 "Content/css/jquery.dataTables.css",
                 "Content/css/jquery.dataTables_themeroller.css",
-                "Definitions/tspate.yml",
-                "Definitions/freakstrackingsystem.yml",
-                "Definitions/rarbg.yml",
-                "Definitions/t411.yml",
-                "Definitions/hdbc.yml", // renamed to hdbitscom
-                "Definitions/maniatorrent.yml",
-                "Definitions/nyaa.yml",
-                "Definitions/nachtwerk.yml",
-                "Definitions/leparadisdunet.yml",
-                "Definitions/qctorrent.yml",
-                "Definitions/dragonworld.yml",
-                "Definitions/hdclub.yml",
-                "Definitions/polishtracker.yml",
-                "Definitions/zetorrents.yml",
-                "Definitions/rapidetracker.yml",
-                "Definitions/isohunt.yml",
-                "Definitions/t411v2.yml",
-                "Definitions/bithq.yml",
-                "Definitions/blubits.yml",
-                "Definitions/torrentproject.yml",
-                "Definitions/torrentvault.yml",
-                "Definitions/apollo.yml", // migrated to C# gazelle base tracker
-                "Definitions/secretcinema.yml", // migrated to C# gazelle base tracker
-                "Definitions/utorrents.yml", // same as SzeneFZ now
-                "Definitions/ultrahdclub.yml",
-                "Definitions/infinityt.yml",
-                "Definitions/hachede-c.yml",
-                "Definitions/skytorrents.yml",
-                "Definitions/gormogon.yml",
-                "Definitions/czteam.yml",
-                "Definitions/rockhardlossless.yml",
-                "Definitions/oxtorrent.yml",
-                "Definitions/tehconnection.yml",
-                "Definitions/torrentwtf.yml",
-                "Definitions/eotforum.yml",
-                "Definitions/nexttorrent.yml",
-                "Definitions/torrentsmd.yml",
-                "Definitions/scenehd.yml", // migrated to C# (use JSON API)
-                "appsettings.Development.json",
+                "CsQuery.dll",
                 "CurlSharp.dll",
                 "CurlSharp.pdb",
-                "Jackett.dll",
-                "Jackett.dll.config",
-                "Jackett.pdb",
-                "Autofac.Integration.WebApi.dll",
+                "Definitions/420files.yml",
+                "Definitions/academictorrents.yml",
+                "Definitions/alein.yml",
+                "Definitions/alexfilm.yml",
+                "Definitions/anidex.yml", // migrated to C#
+                "Definitions/aox.yml",
+                "Definitions/apollo.yml", // migrated to C# gazelle base tracker
+                "Definitions/archetorrent.yml",
+                "Definitions/asiandvdclub.yml",
+                "Definitions/avg.yml",
+                "Definitions/awesomehd.yml", // migrated to C#
+                "Definitions/b2s-share.yml",
+                "Definitions/badasstorrents.yml", // to be migrated to c#
+                "Definitions/bithq.yml",
+                "Definitions/bitme.yml",
+                "Definitions/bittorrentam.yml",
+                "Definitions/blubits.yml",
+                "Definitions/brobits.yml",
+                "Definitions/bt-scene.yml",
+                "Definitions/btbit.yml",
+                "Definitions/bteye.yml",
+                "Definitions/btkitty.yml",
+                "Definitions/btstornet.yml",
+                "Definitions/btxpress.yml",
+                "Definitions/cili180.yml", // renamed to liaorencili
+                "Definitions/cinefilhd.yml",
+                "Definitions/crazyscorner.yml",
+                "Definitions/czteam.yml",
+                "Definitions/cztorrent.yml",
+                "Definitions/darmowetorenty.yml", // migrated to C#
+                "Definitions/demonsite.yml",
+                "Definitions/digbt.yml",
+                "Definitions/downloadville.yml",
+                "Definitions/dragonworld.yml",
+                "Definitions/dreamteam.yml",
+                "Definitions/eggmeon.yml",
+                "Definitions/elitehd.yml",
+                "Definitions/elitetorrent-biz.yml",
+                "Definitions/elittracker.yml",
+                "Definitions/eotforum.yml",
+                "Definitions/estrenosdtl.yml",
+                "Definitions/evolutionpalace.yml",
+                "Definitions/extratorrent-ag.yml",
+                "Definitions/exoticaz.yml", // migrated to C#
+                "Definitions/extratorrentclone.yml",
+                "Definitions/feedurneed.yml",
+                "Definitions/filmsclub.yml",
+                "Definitions/freakstrackingsystem.yml",
+                "Definitions/freedomhd.yml",
+                "Definitions/gdf76.yml",
+                "Definitions/gfxnews.yml",
+                "Definitions/gods.yml",
+                "Definitions/gormogon.yml",
+                "Definitions/greeklegends.yml",
+                "Definitions/hachede-c.yml",
+                "Definitions/hd4free.yml",
+                "Definitions/hdbc.yml", // renamed to hdbitscom
+                "Definitions/hdclub.yml",
+                "Definitions/hdplus.yml",
+                "Definitions/hon3yhd-net.yml",
+                "Definitions/horriblesubs.yml",
+                "Definitions/hyperay.yml",
+                "Definitions/icetorrent.yml", // migrated to C# XtremeZone base tracker
+                "Definitions/idopeclone.yml",
+                "Definitions/iloveclassics.yml",
+                "Definitions/infinityt.yml",
+                "Definitions/inperil.yml",
+                "Definitions/isohunt.yml",
+                "Definitions/kapaki.yml",
+                "Definitions/katcrs.yml",
+                "Definitions/kaztorka.yml",
+                "Definitions/kikibt.yml",
+                "Definitions/liaorencili.yml",
+                "Definitions/lapausetorrents.yml",
+                "Definitions/lemencili.yml",
+                "Definitions/leparadisdunet.yml",
+                "Definitions/leporno.yml",
+                "Definitions/maniatorrent.yml",
+                "Definitions/manicomioshare.yml",
+                "Definitions/megabliz.yml",
+                "Definitions/metal-iplay-ro.yml", // renamed to romanianmetaltorrents
+                "Definitions/mkvcage.yml",
+                "Definitions/moecat.yml",
+                "Definitions/music-master.yml",
+                "Definitions/nachtwerk.yml",
+                "Definitions/nexttorrent.yml",
+                "Definitions/nnm-club.yml", // renamed to noname-club
+                "Definitions/nordichd.yml",
+                "Definitions/nostalgic.yml", // renamed to vhstapes
+                "Definitions/nyaa.yml",
+                "Definitions/nyoo.yml",
+                "Definitions/passionetorrent.yml",
+                "Definitions/polishtracker.yml",
+                "Definitions/pt99.yml",
+                "Definitions/qctorrent.yml",
+                "Definitions/qxr.yml",
+                "Definitions/rapidetracker.yml",
+                "Definitions/rarbg.yml",
+                "Definitions/redtopia.yml",
+                "Definitions/rgu.yml",
+                "Definitions/rns.yml", // site merged with audiobooktorrents
+                "Definitions/rockethd.yml",
+                "Definitions/rockhardlossless.yml",
+                "Definitions/rodvd.yml",
+                "Definitions/scenefz.yml", // migrated to C# XtremeZone base tracker
+                "Definitions/scenehd.yml", // migrated to C# (use JSON API)
+                "Definitions/scenereactor.yml",
+                "Definitions/scenexpress.yml",
+                "Definitions/secretcinema.yml", // migrated to C# gazelle base tracker
+                "Definitions/seedpeer.yml",
+                "Definitions/sharespacedb.yml",
+                "Definitions/sharingue.yml",
+                "Definitions/skytorrents.yml",
+                "Definitions/solidtorrents.yml", // migrated to C#
+                "Definitions/soundpark.yml", // to be migrated to C#
+                "Definitions/speed-share.yml",
+                "Definitions/t411.yml",
+                "Definitions/t411v2.yml",
+                "Definitions/tazmaniaden.yml",
+                "Definitions/tbplus.yml",
+                "Definitions/tehconnection.yml",
+                "Definitions/tfile.yml",
+                "Definitions/themoviecave.yml",
+                "Definitions/theresurrection.yml",
+                "Definitions/thetorrents.yml",
+                "Definitions/the-madhouse.yml",
+                "Definitions/thepiratebay.yml", // migrated to c#
+                "Definitions/theunknown.yml", // became 3evils #9678
+                "Definitions/tigers-dl.yml",
+                "Definitions/tntvillage.yml",
+                "Definitions/topnow.yml",
+                "Definitions/torrentcouch.yml",
+                "Definitions/torrenthane.yml",
+                "Definitions/torrentkim.yml",
+                "Definitions/torrentproject.yml",
+                "Definitions/torrentrex.yml",
+                "Definitions/torrentseed.yml", // renamed to latinop2p #9065
+                "Definitions/torrentseeds.yml", // migrated to c#
+                "Definitions/torrentsmd.yml",
+                "Definitions/torrentvault.yml",
+                "Definitions/torrentwal.yml",
+                "Definitions/torrentwtf.yml",
+                "Definitions/torrof.yml",
+                "Definitions/torviet.yml",
+                "Definitions/tspate.yml",
+                "Definitions/turknova.yml",
+                "Definitions/u-torrents.yml",
+                "Definitions/ultimategamerclub.yml",
+                "Definitions/ultrahdclub.yml",
+                "Definitions/uniotaku.yml", // to be migrated to c#
+                "Definitions/utorrents.yml", // same as SzeneFZ now
+                "Definitions/vanila.yml",
+                "Definitions/vhstapes.yml",
+                "Definitions/world-of-tomorrow.yml", // #9213
+                "Definitions/waffles.yml",
+                "Definitions/worldofp2p.yml",
+                "Definitions/worldwidetorrents.yml",
+                "Definitions/xktorrent.yml",
+                "Definitions/xtremefile.yml",
+                "Definitions/xtremezone.yml", // migrated to C# XtremeZone base tracker
+                "Definitions/yourexotic.yml", // renamed to exoticaz.yml
                 "Microsoft.Owin.dll",
                 "Microsoft.Owin.FileSystems.dll",
                 "Microsoft.Owin.Host.HttpListener.dll",
                 "Microsoft.Owin.Hosting.dll",
                 "Microsoft.Owin.StaticFiles.dll",
                 "Owin.dll",
+                "System.ServiceModel.dll",
                 "System.Web.Http.dll",
                 "System.Web.Http.Owin.dll",
                 "System.Web.Http.Tracing.dll",
-                "Definitions/torrentkim.yml",
-                "Definitions/horriblesubs.yml",
-                "Definitions/idope.yml",
-                "Definitions/bt-scene.yml",
-                "Definitions/extratorrentclone.yml",
-                "Definitions/btdb.yml",
+                "System.Xml.XPath.XmlDocument.dll"
             };
 
             foreach (var oldFile in oldFiles)
@@ -299,11 +452,16 @@ namespace Jackett.Updater
                 }
             }
 
+            // remove .lock file to detect errors in the update process
+            var lockFilePath = Path.Combine(options.Path, ".lock");
+            if (File.Exists(lockFilePath))
+                File.Delete(lockFilePath);
+
             // kill pids after the update on UNIX
             if (!isWindows)
                 KillPids(pids);
 
-            if (options.NoRestart == false)
+            if (!options.NoRestart)
             {
                 if (isWindows && (trayRunning || options.StartTray) && !string.Equals(options.Type, "WindowsService", StringComparison.OrdinalIgnoreCase))
                 {
@@ -328,12 +486,13 @@ namespace Jackett.Updater
                 {
                     logger.Info("Starting Windows service");
 
-                    if (ServerUtil.IsUserAdministrator())
+                    try
                     {
                         windowsService.Start();
                     }
-                    else
+                    catch
                     {
+                        logger.Info("Failed to start service. Attempting to start console.");
                         try
                         {
                             var consolePath = Path.Combine(options.Path, "JackettConsole.exe");
@@ -341,17 +500,16 @@ namespace Jackett.Updater
                         }
                         catch
                         {
-                            logger.Error("Failed to get admin rights to start the service.");
+                            logger.Error("Failed to start the service or console.");
                         }
                     }
-
                 }
                 else
                 {
                     var startInfo = new ProcessStartInfo()
                     {
                         Arguments = options.Args,
-                        FileName = Path.Combine(options.Path, "JackettConsole.exe"),
+                        FileName = GetJackettConsolePath(options.Path),
                         UseShellExecute = true
                     };
 
@@ -363,10 +521,18 @@ namespace Jackett.Updater
                         startInfo.CreateNoWindow = false;
                         startInfo.WindowStyle = ProcessWindowStyle.Normal;
                     }
-                    else
+
+                    if (variant == Variants.JackettVariant.Mono)
                     {
                         startInfo.Arguments = startInfo.FileName + " " + startInfo.Arguments;
                         startInfo.FileName = "mono";
+                    }
+
+                    if (variant == Variants.JackettVariant.CoreMacOs || variant == Variants.JackettVariant.CoreLinuxAmdx64
+                    || variant == Variants.JackettVariant.CoreLinuxArm32 || variant == Variants.JackettVariant.CoreLinuxArm64)
+                    {
+                        startInfo.UseShellExecute = false;
+                        startInfo.CreateNoWindow = true;
                     }
 
                     logger.Info("Starting Jackett: " + startInfo.FileName + " " + startInfo.Arguments);
@@ -375,10 +541,93 @@ namespace Jackett.Updater
             }
         }
 
+        private bool CopyUpdateFile(string jackettDestinationDirectory, string fullSourceFilePath, string updateSourceDirectory, bool previousAttemptFailed)
+        {
+            var success = false;
+
+            string fileName;
+            string fullDestinationFilePath;
+            string fileDestinationDirectory;
+
+            try
+            {
+                fileName = Path.GetFileName(fullSourceFilePath);
+                fullDestinationFilePath = Path.Combine(jackettDestinationDirectory, fullSourceFilePath.Substring(updateSourceDirectory.Length));
+                fileDestinationDirectory = Path.GetDirectoryName(fullDestinationFilePath);
+            }
+            catch (Exception e)
+            {
+                logger.Error(e);
+                return false;
+            }
+
+            logger.Info($"Attempting to copy {fileName} from source: {fullSourceFilePath} to destination: {fullDestinationFilePath}");
+
+            if (previousAttemptFailed)
+            {
+                logger.Info("The first attempt copying file: " + fileName + "failed. Retrying and will delete old file first");
+
+                try
+                {
+                    if (File.Exists(fullDestinationFilePath))
+                    {
+                        logger.Info(fullDestinationFilePath + " was found");
+                        System.Threading.Thread.Sleep(1000);
+                        File.Delete(fullDestinationFilePath);
+                        logger.Info("Deleted " + fullDestinationFilePath);
+                        System.Threading.Thread.Sleep(1000);
+                    }
+                    else
+                    {
+                        logger.Info(fullDestinationFilePath + " was NOT found");
+                    }
+                }
+                catch (Exception e)
+                {
+                    logger.Error(e);
+                }
+            }
+
+            try
+            {
+                if (!Directory.Exists(fileDestinationDirectory))
+                {
+                    logger.Info("Creating directory " + fileDestinationDirectory);
+                    Directory.CreateDirectory(fileDestinationDirectory);
+                }
+
+                File.Copy(fullSourceFilePath, fullDestinationFilePath, true);
+                logger.Info("Copied " + fileName);
+                success = true;
+            }
+            catch (Exception e)
+            {
+                logger.Error(e);
+            }
+
+            return success;
+        }
+
         private string GetUpdateLocation()
         {
-            var location = new Uri(Assembly.GetEntryAssembly().GetName().CodeBase);
-            return new FileInfo(WebUtility.UrlDecode(location.AbsolutePath)).DirectoryName;
+            // Use EscapedCodeBase to avoid Uri reserved characters from causing bugs
+            // https://stackoverflow.com/questions/896572
+            var location = new Uri(Assembly.GetEntryAssembly().GetName().EscapedCodeBase);
+            // Use LocalPath instead of AbsolutePath to avoid needing to unescape Uri format.
+            return new FileInfo(location.LocalPath).DirectoryName;
+        }
+
+        private string GetJackettConsolePath(string directoryPath)
+        {
+            var variants = new Variants();
+            return Path.Combine(directoryPath, variants.IsNonWindowsDotNetCoreVariant(variant) ? "jackett" : "JackettConsole.exe");
+        }
+
+        private static void UnhandledExceptionTrapper(object sender, UnhandledExceptionEventArgs e)
+        {
+            Console.WriteLine(e.ExceptionObject.ToString());
+            logger.Error(e.ExceptionObject.ToString());
+            Environment.Exit(1);
         }
     }
 }

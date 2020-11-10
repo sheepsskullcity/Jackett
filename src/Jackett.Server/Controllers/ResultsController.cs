@@ -1,4 +1,12 @@
-﻿using Jackett.Common;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using Jackett.Common;
 using Jackett.Common.Indexers;
 using Jackett.Common.Indexers.Meta;
 using Jackett.Common.Models;
@@ -10,14 +18,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
 using NLog;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using System.Xml.Linq;
 
 namespace Jackett.Server.Controllers
 {
@@ -25,10 +25,7 @@ namespace Jackett.Server.Controllers
     {
         public IServerService serverService;
 
-        public RequiresApiKey(IServerService ss)
-        {
-            serverService = ss;
-        }
+        public RequiresApiKey(IServerService ss) => serverService = ss;
 
         public void OnActionExecuting(ActionExecutingContext context)
         {
@@ -74,7 +71,7 @@ namespace Jackett.Server.Controllers
             }
 
             var indexerId = parameters["indexerId"] as string;
-            if (indexerId.IsNullOrEmptyOrWhitespace())
+            if (string.IsNullOrWhiteSpace(indexerId))
             {
                 indexerController.CurrentIndexer = null;
                 context.Result = ResultsController.GetErrorActionResult(context.RouteData, HttpStatusCode.NotFound, 201, "Indexer is not specified (empty value)");
@@ -142,8 +139,9 @@ namespace Jackett.Server.Controllers
 
             if (!resultController.CurrentIndexer.CanHandleQuery(resultController.CurrentQuery))
             {
-                context.Result = ResultsController.GetErrorActionResult(context.RouteData, HttpStatusCode.BadRequest, 201, $"{resultController.CurrentIndexer.ID} " +
-                    $"does not support the requested query. Please check the capabilities (t=caps) and make sure the search mode and categories are supported.");
+                context.Result = ResultsController.GetErrorActionResult(context.RouteData, HttpStatusCode.BadRequest, 201, 
+                    $"{resultController.CurrentIndexer.Id} does not support the requested query. " +
+                    "Please check the capabilities (t=caps) and make sure the search mode and parameters are supported.");
 
             }
         }
@@ -170,10 +168,10 @@ namespace Jackett.Server.Controllers
         public IIndexerManagerService IndexerService { get; private set; }
         public IIndexer CurrentIndexer { get; set; }
         public TorznabQuery CurrentQuery { get; set; }
-        private Logger logger;
-        private IServerService serverService;
-        private ICacheService cacheService;
-        private Common.Models.Config.ServerConfig serverConfig;
+        private readonly Logger logger;
+        private readonly IServerService serverService;
+        private readonly ICacheService cacheService;
+        private readonly Common.Models.Config.ServerConfig serverConfig;
 
         public ResultsController(IIndexerManagerService indexerManagerService, IServerService ss, ICacheService c, Logger logger, Common.Models.Config.ServerConfig sConfig)
         {
@@ -190,7 +188,7 @@ namespace Jackett.Server.Controllers
         {
             //TODO: Better way to parse querystring
 
-            ApiSearch request = new ApiSearch();
+            var request = new ApiSearch();
 
             foreach (var t in Request.Query)
             {
@@ -201,7 +199,7 @@ namespace Jackett.Server.Controllers
 
                 if (t.Key == "Category[]")
                 {
-                    request.Category = t.Value.ToString().Split(',').Select(Int32.Parse).ToArray();
+                    request.Category = t.Value.ToString().Split(',').Select(int.Parse).ToArray();
                     CurrentQuery.Categories = request.Category;
                 }
 
@@ -214,28 +212,26 @@ namespace Jackett.Server.Controllers
             var manualResult = new ManualSearchResult();
             var trackers = IndexerService.GetAllIndexers().ToList().Where(t => t.IsConfigured);
             if (request.Tracker != null)
-            {
-                trackers = trackers.Where(t => request.Tracker.Contains(t.ID));
-            }
-
+                trackers = trackers.Where(t => request.Tracker.Contains(t.Id));
             trackers = trackers.Where(t => t.CanHandleQuery(CurrentQuery));
 
-            var tasks = trackers.ToList().Select(t => t.ResultsForQuery(CurrentQuery)).ToList();
+            var isMetaIndexer = request.Tracker == null || request.Tracker.Length > 1;
+            var tasks = trackers.ToList().Select(t => t.ResultsForQuery(CurrentQuery, isMetaIndexer)).ToList();
             try
             {
                 var aggregateTask = Task.WhenAll(tasks);
                 await aggregateTask;
             }
-            catch (AggregateException aex)
+            catch (AggregateException e)
             {
-                foreach (var ex in aex.InnerExceptions)
+                foreach (var ex in e.InnerExceptions)
                 {
                     logger.Error(ex);
                 }
             }
-            catch (Exception ex)
+            catch (Exception e)
             {
-                logger.Error(ex);
+                logger.Error(e);
             }
 
             manualResult.Indexers = tasks.Select(t =>
@@ -265,7 +261,7 @@ namespace Jackett.Server.Controllers
 
                 if (indexer != null)
                 {
-                    resultIndexer.ID = indexer.ID;
+                    resultIndexer.ID = indexer.Id;
                     resultIndexer.Name = indexer.DisplayName;
                 }
                 return resultIndexer;
@@ -281,7 +277,7 @@ namespace Jackett.Server.Controllers
                 {
                     var item = AutoMapper.Mapper.Map<TrackerCacheResult>(result);
                     item.Tracker = indexer.DisplayName;
-                    item.TrackerId = indexer.ID;
+                    item.TrackerId = indexer.Id;
                     item.Peers = item.Peers - item.Seeders; // Use peers as leechers
 
                     return item;
@@ -323,7 +319,7 @@ namespace Jackett.Server.Controllers
                     new XElement("indexers",
                         from i in indexers
                         select new XElement("indexer",
-                            new XAttribute("id", i.ID),
+                            new XAttribute("id", i.Id),
                             new XAttribute("configured", i.IsConfigured),
                             new XElement("title", i.DisplayName),
                             new XElement("description", i.DisplayDescription),
@@ -355,10 +351,34 @@ namespace Jackett.Server.Controllers
                     return GetErrorXML(201, "Incorrect parameter: invalid imdbid format");
                 }
 
-                if (!CurrentIndexer.TorznabCaps.SupportsImdbSearch)
+                if (CurrentQuery.IsMovieSearch && !CurrentIndexer.TorznabCaps.MovieSearchImdbAvailable)
                 {
                     logger.Warn($"A search request with imdbid from {Request.HttpContext.Connection.RemoteIpAddress} was made but the indexer {CurrentIndexer.DisplayName} doesn't support it.");
-                    return GetErrorXML(203, "Function Not Available: imdbid is not supported by this indexer");
+                    return GetErrorXML(203, "Function Not Available: imdbid is not supported for movie search by this indexer");
+                }
+
+                if (CurrentQuery.IsTVSearch && !CurrentIndexer.TorznabCaps.TvSearchImdbAvailable)
+                {
+                    logger.Warn($"A search request with imdbid from {Request.HttpContext.Connection.RemoteIpAddress} was made but the indexer {CurrentIndexer.DisplayName} doesn't support it.");
+                    return GetErrorXML(203, "Function Not Available: imdbid is not supported for TV search by this indexer");
+                }
+            }
+
+            if (CurrentQuery.TmdbID != null)
+            {
+                if (CurrentQuery.IsMovieSearch && !CurrentIndexer.TorznabCaps.MovieSearchTmdbAvailable)
+                {
+                    logger.Warn($"A search request with tmdbid from {Request.HttpContext.Connection.RemoteIpAddress} was made but the indexer {CurrentIndexer.DisplayName} doesn't support it.");
+                    return GetErrorXML(203, "Function Not Available: tmdbid is not supported for movie search by this indexer");
+                }
+            }
+
+            if (CurrentQuery.TvdbID != null)
+            {
+                if (CurrentQuery.IsTVSearch && !CurrentIndexer.TorznabCaps.TvSearchAvailable)
+                {
+                    logger.Warn($"A search request with tvdbid from {Request.HttpContext.Connection.RemoteIpAddress} was made but the indexer {CurrentIndexer.DisplayName} doesn't support it.");
+                    return GetErrorXML(203, "Function Not Available: tvdbid is not supported for movie search by this indexer");
                 }
             }
 
@@ -400,7 +420,7 @@ namespace Jackett.Server.Controllers
                     Title = CurrentIndexer.DisplayName,
                     Description = CurrentIndexer.DisplayDescription,
                     Link = new Uri(CurrentIndexer.SiteLink),
-                    ImageUrl = new Uri(serverUrl + "logos/" + CurrentIndexer.ID + ".png"),
+                    ImageUrl = new Uri(serverUrl + "logos/" + CurrentIndexer.Id + ".png"),
                     ImageTitle = CurrentIndexer.DisplayName,
                     ImageLink = new Uri(CurrentIndexer.SiteLink),
                     ImageDescription = CurrentIndexer.DisplayName
@@ -408,7 +428,7 @@ namespace Jackett.Server.Controllers
 
                 var proxiedReleases = result.Releases.Select(r => AutoMapper.Mapper.Map<ReleaseInfo>(r)).Select(r =>
                 {
-                    r.Link = serverService.ConvertToProxyLink(r.Link, serverUrl, r.Origin.ID, "dl", r.Title);
+                    r.Link = serverService.ConvertToProxyLink(r.Link, serverUrl, r.Origin.Id, "dl", r.Title);
                     return r;
                 });
 
@@ -419,18 +439,15 @@ namespace Jackett.Server.Controllers
 
                 return Content(xml, "application/rss+xml", Encoding.UTF8);
             }
-            catch (Exception ex)
+            catch (Exception e)
             {
-                logger.Error(ex);
-                return GetErrorXML(900, ex.ToString());
+                logger.Error(e);
+                return GetErrorXML(900, e.ToString());
             }
         }
 
         [Route("[action]/{ignored?}")]
-        public IActionResult GetErrorXML(int code, string description)
-        {
-            return Content(CreateErrorXML(code, description), "application/xml", Encoding.UTF8);
-        }
+        public IActionResult GetErrorXML(int code, string description) => Content(CreateErrorXML(code, description), "application/xml", Encoding.UTF8);
 
         public static string CreateErrorXML(int code, string description)
         {
@@ -446,11 +463,11 @@ namespace Jackett.Server.Controllers
 
         public static IActionResult GetErrorActionResult(RouteData routeData, HttpStatusCode status, int torznabCode, string description)
         {
-            bool isTorznab = routeData.Values["action"].ToString().Equals("torznab", StringComparison.OrdinalIgnoreCase);
+            var isTorznab = routeData.Values["action"].ToString().Equals("torznab", StringComparison.OrdinalIgnoreCase);
 
             if (isTorznab)
             {
-                ContentResult contentResult = new ContentResult
+                var contentResult = new ContentResult
                 {
                     Content = CreateErrorXML(torznabCode, description),
                     ContentType = "application/xml",
@@ -498,13 +515,15 @@ namespace Jackett.Server.Controllers
             var potatoReleases = result.Releases.Where(r => r.Link != null || r.MagnetUri != null).Select(r =>
             {
                 var release = AutoMapper.Mapper.Map<ReleaseInfo>(r);
-                release.Link = serverService.ConvertToProxyLink(release.Link, serverUrl, CurrentIndexer.ID, "dl", release.Title);
+                release.Link = serverService.ConvertToProxyLink(release.Link, serverUrl, CurrentIndexer.Id, "dl", release.Title);
+                // IMPORTANT: We can't use Uri.ToString(), because it generates URLs without URL encode (links with unicode
+                // characters are broken). We must use Uri.AbsoluteUri instead that handles encoding correctly
                 var item = new TorrentPotatoResponseItem()
                 {
                     release_name = release.Title + "[" + CurrentIndexer.DisplayName + "]", // Suffix the indexer so we can see which tracker we are using in CPS as it just says torrentpotato >.>
-                    torrent_id = release.Guid.ToString(),
-                    details_url = release.Comments.ToString(),
-                    download_url = (release.Link != null ? release.Link.ToString() : release.MagnetUri.ToString()),
+                    torrent_id = release.Guid.AbsoluteUri, // GUID and (Link or Magnet) are mandatory
+                    details_url = release.Details?.AbsoluteUri,
+                    download_url = (release.Link != null ? release.Link.AbsoluteUri : release.MagnetUri.AbsoluteUri),
                     imdb_id = release.Imdb.HasValue ? ParseUtil.GetFullImdbID("tt" + release.Imdb) : null,
                     freeleech = (release.DownloadVolumeFactor == 0 ? true : false),
                     type = "movie",

@@ -1,9 +1,11 @@
-﻿using Newtonsoft.Json;
+using System.Diagnostics.CodeAnalysis;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Jackett.Common.Models.IndexerConfig.Bespoke
 {
-    public class ConfigurationDataNCore : ConfigurationData
+    [ExcludeFromCodeCoverage]
+    internal class ConfigurationDataNCore : ConfigurationData
     {
         public StringItem Username { get; private set; }
         public StringItem Password { get; private set; }
@@ -22,12 +24,12 @@ namespace Jackett.Common.Models.IndexerConfig.Bespoke
 
         public ConfigurationDataNCore(JToken json)
         {
-            ConfigurationDataNCore configData = new ConfigurationDataNCore();
+            var configData = new ConfigurationDataNCore();
 
             dynamic configArray = JsonConvert.DeserializeObject(json.ToString());
             foreach (var config in configArray)
             {
-                string propertyName = UppercaseFirst((string)config.id);
+                var propertyName = UppercaseFirst((string)config.id);
                 switch (propertyName)
                 {
                     case "Username":
@@ -51,7 +53,7 @@ namespace Jackett.Common.Models.IndexerConfig.Bespoke
             }
         }
 
-        static string UppercaseFirst(string s)
+        private static string UppercaseFirst(string s)
         {
             if (string.IsNullOrEmpty(s))
                 return string.Empty;

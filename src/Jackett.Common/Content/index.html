@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
@@ -7,17 +7,17 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta charset="utf-8" />
-    <meta name="referrer" content="no-referrer" /> <!-- Don't send referrer when loading third party ressources (E.g. Empornium banner images won't load) -->
+    <meta name="referrer" content="no-referrer" /> <!-- Don't send referrer when loading third party resources (E.g. Empornium poster images won't load) -->
     <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="57x57" href="../apple-touch-icon-57x57.png" />
     <link rel="apple-touch-icon" sizes="72x72" href="../apple-touch-icon-72x72.png" />
     <link rel="apple-touch-icon" sizes="76x76" href="../apple-touch-icon-76x76.png" />
     <link rel="apple-touch-icon" sizes="114x114" href="../apple-touch-icon-114x114.png" />
     <link rel="apple-touch-icon" sizes="120x120" href="../apple-touch-icon-120x120.png" />
-    <link rel="apple-touch-icon" sizes="144x144" href="../apple-touch-icon-144x144" />
+    <link rel="apple-touch-icon" sizes="144x144" href="../apple-touch-icon-144x144.png" />
     <link rel="apple-touch-icon" sizes="152x152" href="../apple-touch-icon-152x152.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon-180x180.png" />
-    <link rel="mask-icon" href="jackett_medium.png" color="#35c5f4">
+    <link rel="mask-icon" href="../jackett_medium.png" color="#35c5f4">
     <link rel="icon" type="image/ico" href="../favicon.ico" />
     <link rel='shortcut icon' type='image/x-icon' href='../favicon.ico' />
     <script type="text/javascript" src="../libs/filesize.min.js?changed=2017083001"></script>
@@ -30,12 +30,11 @@
     <script type="text/javascript" src="../bootstrap/bootstrap.min.js?changed=2017083001"></script>
     <script type="text/javascript" src="../libs/bootstrap-notify.js?changed=2017083001"></script>
     <script type="text/javascript" src="../libs/bootstrap-multiselect.js?changed=2017083001"></script>
-    <!--<script type="text/javascript" src="https://www.google.com/recaptcha/api.js?render=explicit" async defer></script>-->
 
     <link rel="stylesheet" type="text/css" href="../bootstrap/bootstrap.min.css?changed=2017083001">
     <link rel="stylesheet" type="text/css" href="../animate.css?changed=2017083001">
-    <link rel="stylesheet" type="text/css" href="../custom.css?changed=2017083001" media="only screen and (min-device-width: 480px)">
-    <link rel="stylesheet" type="text/css" href="../custom_mobile.css?changed=2017083001" media="only screen and (max-device-width: 480px)">
+    <link rel="stylesheet" type="text/css" href="../custom.css?changed=20200223" media="only screen and (min-device-width: 480px)">
+    <link rel="stylesheet" type="text/css" href="../custom_mobile.css?changed=20200223" media="only screen and (max-device-width: 480px)">
     <link rel="stylesheet" type="text/css" href="../css/jquery.dataTables.min.css?changed=2017083001">
     <link rel="stylesheet" type="text/css" href="../css/bootstrap-multiselect.css?changed=2017083001" />
     <link rel="stylesheet" type="text/css" href="../css/font-awesome.min.css?changed=2017083001">
@@ -51,6 +50,14 @@
             <input id="api-key-input" class="form-control input-right" type="text" value="" placeholder="API Key" readonly="">
         </div>
         <hr />
+
+        <div id="can-upgrade-from-mono" hidden class="alert alert-info" role="alert">
+            <strong>Standalone version of Jackett is now available - Mono not required</strong> <br>
+            To upgrade to the standalone version of Jackett, <a href="https://github.com/Jackett/Jackett#install-on-linux-amdx64" target="_blank" class="alert-link">click here</a> for install instructions.
+            Upgrading is straight forward, simply install the standalone version and your indexers/configuration will carry over.
+            Benefits include: increased performance, improved stability and no dependency on Mono.
+        </div>
+
         <div class="pull-right">
             <button id="jackett-add-indexer" class="btn btn-success btn-sm">
                 <span class="glyphicon glyphicon-plus" aria-hidden="true"></span> Add indexer
@@ -87,8 +94,10 @@
             <h4>Adding a Jackett indexer to RSS clients (RSS feed)</h4>
             <ol>
                 <li>Click on the indexers corresponding <button type="button" class="btn btn-xs btn-info">Copy RSS Feed</button> button and paste it into the URL field of the RSS client.</li>
-                <li>You can adjust the <b>q</b> (search string) and <b>cat</b> (categories) arguments accordingly.
-                E.g. <b>...&cat=2030,2040&q=big+buck+bunny</b> will search for "big buck bunny" in the Movies/SD (2030) and Movies/HD (2040) categories (See the indexer configuration for available categories).</li>
+                <li>
+                    You can adjust the <b>q</b> (search string) and <b>cat</b> (categories) arguments accordingly.
+                    E.g. <b>...&cat=2030,2040&q=big+buck+bunny</b> will search for "big buck bunny" in the Movies/SD (2030) and Movies/HD (2040) categories (See the indexer configuration for available categories).
+                </li>
             </ol>
         </div>
         <hr />
@@ -133,14 +142,20 @@
         <div class="input-area">
             <span class="input-header">Proxy type: </span>
             <select id="jackett-proxy-type" class="form-control input-right">
-                <option value="0">http</option>
-                <option value="1">socks4</option>
-                <option value="2">socks5</option>
+                <option value="-1">Disabled</option>
+                <option value="0">HTTP</option>
+                <option value="1">SOCKS4</option>
+                <option value="2">SOCKS5</option>
             </select>
         </div>
+        <div id="proxy-warning" hidden>
+            <span>
+                WARNING: The proxy option potentially leaks requests. Recommendation is to use a VPN.
+            </span>
+        </div>
         <div class="input-area">
-            <span class="input-header">Proxy url: </span>
-            <input id="jackett-proxy-url" class="form-control input-right" type="text" value="" placeholder="Blank to disable">
+            <span class="input-header">Proxy URL: </span>
+            <input id="jackett-proxy-url" class="form-control input-right" type="text" value="" placeholder="">
         </div>
         <div class="input-area">
             <span class="input-header">Proxy port: </span>
@@ -189,13 +204,6 @@
 
     <div id="modals"></div>
 
-    <script id="setup-item-nonlocalrecaptcha" type="text/x-handlebars-template">
-        <div class="setup-item-recaptcha">
-            <p>This site requires you to solve a ReCaptcha. It's no longer possible to solve the captcha in Jackett. Please enter the cookie for the site manually. <a href="https://github.com/Jackett/Jackett/wiki/Finding-cookies" target="_blank">See here</a> on how get the cookies.</p>
-            <div class="setup-item-label">Full cookie header</div>
-            <input class="form-control" type="text" value="{{cookieheader}}" />
-        </div>
-    </script>
     <script id="setup-item" type="text/x-handlebars-template">
         <div class="setup-item form-group" data-id="{{id}}" data-value="{{value}}" data-type="{{type}}">
             <div class="setup-item-label">{{name}}</div>
@@ -220,6 +228,19 @@
             {{/if}}
         </div>
     </script>
+    <script id="setup-item-inputcheckbox" type="text/x-handlebars-template">
+        <div class="setup-item-inputcheckbox">
+            {{#each options}}
+            <div class="checkbox"><label>
+            {{#if_in @key ../values}}
+            <input type="checkbox" data-id="{{../../id}}" class="form-control" value="{{@key}}" checked />
+            {{else}}
+            <input type="checkbox" data-id="{{../../id}}" class="form-control" value="{{@key}}" />
+            {{/if_in}}
+            {{this}}</label></div>
+            {{/each}}
+        </div>
+    </script>
     <script id="setup-item-inputselect" type="text/x-handlebars-template">
         <div class="setup-item-inputselect">
             <select class="form-control" data-id="{{id}}">
@@ -231,10 +252,6 @@
                 {{/ifCond}}
                 {{/each}}
             </select>
-        </div>
-    </script>
-    <script id="setup-item-recaptcha" type="text/x-handlebars-template">
-        <div class="jackettrecaptcha">
         </div>
     </script>
     <script id="setup-item-displayimage" type="text/x-handlebars-template">
@@ -385,13 +402,13 @@
                             </thead>
                             <tbody>
                                 {{#each releases}}
-                                <tr class="jackett-releases-row" data-imdb="{{Imdb}}" data-banner="{{BannerUrl}}" data-description="{{Description}}">
+                                <tr class="jackett-releases-row" data-imdb="{{Imdb}}" data-poster="{{Poster}}" data-description="{{Description}}">
                                     <td class="fit">{{PublishDate}}</td>
                                     <td class="fit">{{FirstSeen}}</td>
                                     <td class="fit">{{jacketTimespan PublishDate}}</td>
                                     <td class="fit">{{jacketTimespan FirstSeen}}</td>
                                     <td class="fit">{{Tracker}}</td>
-                                    <td class="Title"><a href="{{Comments}}">{{Title}}</a> <span class="release-labels"></span></td>
+                                    <td class="Title"><a href="{{Details}}">{{Title}}</a> <span class="release-labels"></span></td>
                                     <td class="fit">{{Size}}</td>
                                     <td class="fit">{{jacketSize Size}}</td>
                                     <td class="fit">{{Files}}</td>
@@ -456,7 +473,7 @@
                     <div class="modal-body">
                         <p>You can search all configured indexers from this screen.</p>
                         <label for="text">Query</label>
-                        <input type="text" name="query" id="searchquery" />
+                        <input class="form-control" type="text" name="query" id="searchquery" />
                         <label for="tracker">Tracker</label>
                         <select name="tracker" id="searchTracker" multiple="multiple">
                             {{#each indexers}}
@@ -508,11 +525,11 @@
             </thead>
             <tbody>
                 {{#each Results}}
-                <tr class="jackett-search-results-row" data-imdb="{{Imdb}}" data-banner="{{BannerUrl}}" data-description="{{Description}}">
+                <tr class="jackett-search-results-row" data-imdb="{{Imdb}}" data-poster="{{Poster}}" data-description="{{Description}}">
                     <td>{{PublishDate}}</td>
                     <td>{{jacketTimespan PublishDate}}</td>
                     <td>{{Tracker}}</td>
-                    <td class="Title"><a href="{{Comments}}" target="_blank">{{Title}}</a> <span class="release-labels"></span></td>
+                    <td class="Title"><a href="{{Details}}" target="_blank">{{Title}}</a> <span class="release-labels"></span></td>
                     <td>{{Size}}</td>
                     <td class="fit">{{jacketSize Size}}</td>
                     <td>{{Files}}</td>
@@ -588,16 +605,16 @@
                         <table class="dataTable compact cell-border hover stripe">
                             <thead>
                                 <tr>
-                                    <th style="width: 200px">When</th>
-                                    <th style="width: 80px">Level</th>
+                                    <th>Date</th>
+                                    <th>Level</th>
                                     <th>Message</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {{#each logs}}
                                 <tr class="jackettlog{{Level}}">
-                                    <td>{{dateFormat When}}</td>
-                                    <td>{{Level}}</td>
+                                    <td class="jackettlog-narrowcol">{{dateFormat When}}</td>
+                                    <td class="jackettlog-narrowcol">{{Level}}</td>
                                     <td><pre>{{Message}}</pre></td>
                                 </tr>
                                 {{/each}}
@@ -663,6 +680,6 @@
     </script>
 
     <script type="text/javascript" src="../libs/api.js?changed=2017083001"></script>
-    <script type="text/javascript" src="../custom.js?changed=20180711"></script>
+    <script type="text/javascript" src="../custom.js?changed=20201107"></script>
 </body>
 </html>

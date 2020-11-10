@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -8,37 +9,48 @@ using System.Xml;
 using Jackett.Common.Models;
 using Jackett.Common.Models.IndexerConfig;
 using Jackett.Common.Services.Interfaces;
-using Jackett.Common.Utils;
 using Jackett.Common.Utils.Clients;
 using Newtonsoft.Json.Linq;
 using NLog;
 
 namespace Jackett.Common.Indexers
 {
+    [ExcludeFromCodeCoverage]
     public class ShowRSS : BaseWebIndexer
     {
-        private string SearchAllUrl { get { return SiteLink + "other/all.rss"; } }
+        private string SearchAllUrl => SiteLink + "other/all.rss";
+        private string BrowseUrl => SiteLink + "browse/";
+        public override string[] LegacySiteLinks { get; protected set; } = {
+            "http://showrss.info/"
+        };
 
-        private new ConfigurationData configData
-        {
-            get { return (ConfigurationData)base.configData; }
-            set { base.configData = value; }
-        }
+        private new ConfigurationData configData => base.configData;
 
         public ShowRSS(IIndexerConfigurationService configService, WebClient wc, Logger l, IProtectionService ps)
-            : base(name: "ShowRSS",
-                description: "showRSS is a service that allows you to keep track of your favorite TV shows",
-                link: "https://showrss.info/",
-                caps: TorznabUtil.CreateDefaultTorznabTVCaps(),
-                configService: configService,
-                client: wc,
-                logger: l,
-                p: ps,
-                configData: new ConfigurationData())
+            : base(id: "showrss",
+                   name: "ShowRSS",
+                   description: "showRSS is a service that allows you to keep track of your favorite TV shows",
+                   link: "https://showrss.info/",
+                   caps: new TorznabCapabilities
+                   {
+                       TvSearchParams = new List<TvSearchParam>
+                       {
+                           TvSearchParam.Q, TvSearchParam.Season, TvSearchParam.Ep
+                       }
+                   },
+                   configService: configService,
+                   client: wc,
+                   logger: l,
+                   p: ps,
+                   configData: new ConfigurationData())
         {
             Encoding = Encoding.UTF8;
             Language = "en-us";
             Type = "public";
+
+            AddCategoryMapping(1, TorznabCatType.TV);
+            AddCategoryMapping(2, TorznabCatType.TVSD);
+            AddCategoryMapping(3, TorznabCatType.TVHD);
         }
 
         public override async Task<IndexerConfigurationStatus> ApplyConfiguration(JToken configJson)
@@ -46,70 +58,60 @@ namespace Jackett.Common.Indexers
             configData.LoadValuesFromJson(configJson);
             var releases = await PerformQuery(new TorznabQuery());
 
-            await ConfigureIfOK(string.Empty, releases.Count() > 0, () =>
-            {
-                throw new Exception("Could not find releases from this URL");
-            });
+            await ConfigureIfOK(string.Empty, releases.Any(),
+                                () => throw new Exception("Could not find releases from this URL"));
 
             return IndexerConfigurationStatus.RequiresTesting;
-        }
-
-        public override Task<byte[]> Download(Uri link)
-        {
-            throw new NotImplementedException();
         }
 
         protected override async Task<IEnumerable<ReleaseInfo>> PerformQuery(TorznabQuery query)
         {
             var releases = new List<ReleaseInfo>();
             var episodeSearchUrl = string.Format(SearchAllUrl);
-            var result = await RequestStringWithCookiesAndRetry(episodeSearchUrl, string.Empty);
+            var result = await RequestWithCookiesAndRetryAsync(episodeSearchUrl);
             var xmlDoc = new XmlDocument();
 
             try
             {
-                xmlDoc.LoadXml(result.Content);
-                ReleaseInfo release;
-                string serie_title;
-
+                xmlDoc.LoadXml(result.ContentString);
                 foreach (XmlNode node in xmlDoc.GetElementsByTagName("item"))
                 {
-                    release = new ReleaseInfo();
-
-                    release.MinimumRatio = 1;
-                    release.MinimumSeedTime = 172800;
-
-                    serie_title = node.SelectSingleNode(".//*[local-name()='raw_title']").InnerText;
-                    release.Title = serie_title;
-
-                    if ((query.ImdbID == null || !TorznabCaps.SupportsImdbSearch) && !query.MatchQueryStringAND(release.Title))
+                    var title = node.SelectSingleNode(".//*[local-name()='raw_title']").InnerText;
+                    if (!query.MatchQueryStringAND(title))
                         continue;
 
-                    release.Comments = new Uri(node.SelectSingleNode("link").InnerText);
+                    // TODO: use Jackett.Common.Utils.TvCategoryParser.ParseTvShowQuality
+                    // guess category from title
+                    var category = title.Contains("720p") || title.Contains("1080p") ?
+                        TorznabCatType.TVHD.ID :
+                        TorznabCatType.TVSD.ID;
 
-                    // Try to guess the category... I'm not proud of myself...
-                    int category = 5030;
-                    if (serie_title.Contains("720p"))
-                        category = 5040;
-                    release.Category = new List<int> { category };
-                    var test = node.SelectSingleNode("enclosure");
-                    release.Guid = new Uri(test.Attributes["url"].Value);
-                    release.PublishDate = DateTime.Parse(node.SelectSingleNode("pubDate").InnerText, CultureInfo.InvariantCulture);
+                    var magnetUri = new Uri(node.SelectSingleNode("link")?.InnerText);
+                    var publishDate = DateTime.Parse(node.SelectSingleNode("pubDate").InnerText, CultureInfo.InvariantCulture);
+                    var infoHash = node.SelectSingleNode(".//*[local-name()='info_hash']").InnerText;
+                    var details = new Uri(BrowseUrl + node.SelectSingleNode(".//*[local-name()='show_id']").InnerText);
 
-                    release.Description = node.SelectSingleNode("description").InnerText;
-                    release.InfoHash = node.SelectSingleNode("description").InnerText;
-                    release.Size = 0;
-                    release.Seeders = 1;
-                    release.Peers = 1;
-                    release.DownloadVolumeFactor = 0;
-                    release.UploadVolumeFactor = 1;
-                    release.MagnetUri = new Uri(node.SelectSingleNode("link").InnerText);
+                    var release = new ReleaseInfo
+                    {
+                        Title = title,
+                        Details = details,
+                        Category = new List<int> { category },
+                        Guid = magnetUri,
+                        PublishDate = publishDate,
+                        InfoHash = infoHash,
+                        MagnetUri = magnetUri,
+                        Size = 0,
+                        Seeders = 1,
+                        Peers = 2,
+                        DownloadVolumeFactor = 0,
+                        UploadVolumeFactor = 1
+                    };
                     releases.Add(release);
                 }
             }
-            catch (Exception ex)
+            catch (Exception e)
             {
-                OnParseError(result.Content, ex);
+                OnParseError(result.ContentString, e);
             }
 
             return releases;

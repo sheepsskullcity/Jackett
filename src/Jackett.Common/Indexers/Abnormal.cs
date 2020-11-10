@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -9,7 +10,9 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using CsQuery;
+using AngleSharp.Dom;
+using AngleSharp.Html.Dom;
+using AngleSharp.Html.Parser;
 using Jackett.Common.Models;
 using Jackett.Common.Models.IndexerConfig.Bespoke;
 using Jackett.Common.Services.Interfaces;
@@ -18,6 +21,7 @@ using Jackett.Common.Utils.Clients;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NLog;
+using WebClient = Jackett.Common.Utils.Clients.WebClient;
 
 namespace Jackett.Common.Indexers
 {
@@ -25,81 +29,77 @@ namespace Jackett.Common.Indexers
     /// Provider for Abnormal Private French Tracker
     /// gazelle based but the ajax.php API seems to be broken (always returning failure)
     /// </summary>
+    [ExcludeFromCodeCoverage]
     public class Abnormal : BaseCachingWebIndexer
     {
-        private string LoginUrl { get { return SiteLink + "login.php"; } }
-        private string SearchUrl { get { return SiteLink + "torrents.php"; } }
-        private string TorrentCommentUrl { get { return TorrentDescriptionUrl; } }
-        private string TorrentDescriptionUrl { get { return SiteLink + "torrents.php?id="; } }
-        private string TorrentDownloadUrl { get { return SiteLink + "torrents.php?action=download&id={id}&authkey={auth_key}&torrent_pass={torrent_pass}"; } }
-        private bool Latency { get { return ConfigData.Latency.Value; } }
-        private bool DevMode { get { return ConfigData.DevMode.Value; } }
-        private bool CacheMode { get { return ConfigData.HardDriveCache.Value; } }
+        private string LoginUrl => SiteLink + "login.php";
+        private string SearchUrl => SiteLink + "torrents.php";
+        private string DetailsUrl => SiteLink + "torrents.php?id=";
+        private string ReplaceMulti => ConfigData.ReplaceMulti.Value;
+        private bool Latency => ConfigData.Latency.Value;
+        private bool DevMode => ConfigData.DevMode.Value;
+        private bool CacheMode => ConfigData.HardDriveCache.Value;
         private static string Directory => Path.Combine(Path.GetTempPath(), Assembly.GetExecutingAssembly().GetName().Name.ToLower(), MethodBase.GetCurrentMethod().DeclaringType?.Name.ToLower());
 
-        private Dictionary<string, string> emulatedBrowserHeaders = new Dictionary<string, string>();
-        private CQ fDom = null;
+        private readonly Dictionary<string, string> emulatedBrowserHeaders = new Dictionary<string, string>();
 
         private ConfigurationDataAbnormal ConfigData
         {
-            get { return (ConfigurationDataAbnormal)configData; }
-            set { base.configData = value; }
+            get => (ConfigurationDataAbnormal)configData;
+            set => configData = value;
         }
 
-        public Abnormal(IIndexerConfigurationService configService, Utils.Clients.WebClient w, Logger l, IProtectionService ps)
-            : base(
-                name: "Abnormal",
-                description: "General French Private Tracker",
-                link: "https://abnormal.ws/",
-                caps: new TorznabCapabilities(),
-                configService: configService,
-                client: w,
-                logger: l,
-                p: ps,
-                downloadBase: "https://abnormal.ws/torrents.php?action=download&id=",
-                configData: new ConfigurationDataAbnormal())
+        public Abnormal(IIndexerConfigurationService configService, WebClient w, Logger l, IProtectionService ps)
+            : base(id: "abnormal",
+                   name: "Abnormal",
+                   description: "General French Private Tracker",
+                   link: "https://abnormal.ws/",
+                   caps: new TorznabCapabilities {
+                       TvSearchParams = new List<TvSearchParam>
+                       {
+                           TvSearchParam.Q, TvSearchParam.Season, TvSearchParam.Ep
+                       },
+                       MovieSearchParams = new List<MovieSearchParam>
+                       {
+                           MovieSearchParam.Q
+                       }
+                   },
+                   configService: configService,
+                   client: w,
+                   logger: l,
+                   p: ps,
+                   downloadBase: "https://abnormal.ws/torrents.php?action=download&id=",
+                   configData: new ConfigurationDataAbnormal())
         {
             Language = "fr-fr";
             Encoding = Encoding.UTF8;
             Type = "private";
+            // NET::ERR_CERT_DATE_INVALID expired ‎29 ‎July ‎2020
+            w.AddTrustedCertificate(new Uri(SiteLink).Host, "9cb32582b564256146616afddbdb8e7c94c428ed");
 
-            // Clean capabilities
-            TorznabCaps.Categories.Clear();
-
-            // Movies
-            AddCategoryMapping("MOVIE|DVDR", TorznabCatType.MoviesDVD);             // DVDR
-            AddCategoryMapping("MOVIE|DVDRIP", TorznabCatType.MoviesSD);            // DVDRIP
-            AddCategoryMapping("MOVIE|BDRIP", TorznabCatType.MoviesSD);             // BDRIP
-            AddCategoryMapping("MOVIE|VOSTFR", TorznabCatType.MoviesOther);         // VOSTFR
-            AddCategoryMapping("MOVIE|HD|720p", TorznabCatType.MoviesHD);           // HD 720P
-            AddCategoryMapping("MOVIE|HD|1080p", TorznabCatType.MoviesHD);          // HD 1080P
-            AddCategoryMapping("MOVIE|REMUXBR", TorznabCatType.MoviesBluRay);       // REMUX BLURAY
-            AddCategoryMapping("MOVIE|FULLBR", TorznabCatType.MoviesBluRay);        // FULL BLURAY
-
-            // Series
-            AddCategoryMapping("TV|SD|VOSTFR", TorznabCatType.TV);                  // SD VOSTFR
-            AddCategoryMapping("TV|HD|VOSTFR", TorznabCatType.TVHD);                // HD VOSTFR
-            AddCategoryMapping("TV|SD|VF", TorznabCatType.TVSD);                    // SD VF
-            AddCategoryMapping("TV|HD|VF", TorznabCatType.TVHD);                    // HD VF
-            AddCategoryMapping("TV|PACK|FR", TorznabCatType.TVOTHER);               // PACK FR
-            AddCategoryMapping("TV|PACK|VOSTFR", TorznabCatType.TVOTHER);           // PACK VOSTFR
-            AddCategoryMapping("TV|EMISSIONS", TorznabCatType.TVOTHER);             // EMISSIONS
-
-            // Anime
-            AddCategoryMapping("ANIME", TorznabCatType.TVAnime);                    // ANIME
-
-            // Documentaries
-            AddCategoryMapping("DOCS", TorznabCatType.TVDocumentary);               // DOCS
-
-            // Music
-            AddCategoryMapping("MUSIC|FLAC", TorznabCatType.AudioLossless);         // FLAC
-            AddCategoryMapping("MUSIC|MP3", TorznabCatType.AudioMP3);               // MP3
-            AddCategoryMapping("MUSIC|CONCERT", TorznabCatType.AudioVideo);         // CONCERT
-
-            // Other
-            AddCategoryMapping("PC|APP", TorznabCatType.PC);                        // PC
-            AddCategoryMapping("PC|GAMES", TorznabCatType.PCGames);                 // GAMES
-            AddCategoryMapping("EBOOKS", TorznabCatType.BooksEbook);                // EBOOKS
+            AddCategoryMapping("MOVIE|DVDR", TorznabCatType.MoviesDVD, "DVDR");
+            AddCategoryMapping("MOVIE|DVDRIP", TorznabCatType.MoviesSD, "DVDRIP");
+            AddCategoryMapping("MOVIE|BDRIP", TorznabCatType.MoviesSD, "BDRIP");
+            AddCategoryMapping("MOVIE|VOSTFR", TorznabCatType.MoviesOther, "VOSTFR");
+            AddCategoryMapping("MOVIE|HD|720p", TorznabCatType.MoviesHD, "HD 720P");
+            AddCategoryMapping("MOVIE|HD|1080p", TorznabCatType.MoviesHD, "HD 1080P");
+            AddCategoryMapping("MOVIE|REMUXBR", TorznabCatType.MoviesBluRay, "REMUX BLURAY");
+            AddCategoryMapping("MOVIE|FULLBR", TorznabCatType.MoviesBluRay, "FULL BLURAY");
+            AddCategoryMapping("TV|SD|VOSTFR", TorznabCatType.TV, "TV SD VOSTFR");
+            AddCategoryMapping("TV|HD|VOSTFR", TorznabCatType.TVHD, "TV HD VOSTFR");
+            AddCategoryMapping("TV|SD|VF", TorznabCatType.TVSD, "TV SD VF");
+            AddCategoryMapping("TV|HD|VF", TorznabCatType.TVHD, "TV HD VF");
+            AddCategoryMapping("TV|PACK|FR", TorznabCatType.TVOther, "TV PACK FR");
+            AddCategoryMapping("TV|PACK|VOSTFR", TorznabCatType.TVOther, "TV PACK VOSTFR");
+            AddCategoryMapping("TV|EMISSIONS", TorznabCatType.TVOther, "TV EMISSIONS");
+            AddCategoryMapping("ANIME", TorznabCatType.TVAnime, "ANIME");
+            AddCategoryMapping("DOCS", TorznabCatType.TVDocumentary, "TV DOCS");
+            AddCategoryMapping("MUSIC|FLAC", TorznabCatType.AudioLossless, "FLAC");
+            AddCategoryMapping("MUSIC|MP3", TorznabCatType.AudioMP3, "MP3");
+            AddCategoryMapping("MUSIC|CONCERT", TorznabCatType.AudioVideo, "CONCERT");
+            AddCategoryMapping("PC|APP", TorznabCatType.PC, "PC");
+            AddCategoryMapping("PC|GAMES", TorznabCatType.PCGames, "GAMES");
+            AddCategoryMapping("EBOOKS", TorznabCatType.BooksEBook, "EBOOKS");
         }
 
         /// <summary>
@@ -134,7 +134,7 @@ namespace Jackett.Common.Indexers
             }
 
             // Getting login form to retrieve CSRF token
-            var myRequest = new Utils.Clients.WebRequest()
+            var myRequest = new Utils.Clients.WebRequest
             {
                 Url = LoginUrl
             };
@@ -151,7 +151,7 @@ namespace Jackett.Common.Indexers
             };
 
             // Do the login
-            var request = new Utils.Clients.WebRequest()
+            var request = new Utils.Clients.WebRequest
             {
                 PostData = pairs,
                 Referer = LoginUrl,
@@ -163,17 +163,18 @@ namespace Jackett.Common.Indexers
             // Perform loggin
             latencyNow();
             output("\nPerform loggin.. with " + LoginUrl);
-            var response = await webclient.GetString(request);
+            var response = await webclient.GetResultAsync(request);
 
             // Test if we are logged in
             await ConfigureIfOK(response.Cookies, response.Cookies.Contains("session="), () =>
             {
                 // Parse error page
-                CQ dom = response.Content;
-                string message = dom[".warning"].Text().Split('.').Reverse().Skip(1).First();
+                var parser = new HtmlParser();
+                var dom = parser.ParseDocument(response.ContentString);
+                var message = dom.QuerySelector(".warning").TextContent.Split('.').Reverse().Skip(1).First();
 
                 // Try left
-                string left = dom[".info"].Text().Trim();
+                var left = dom.QuerySelector(".info").TextContent.Trim();
 
                 // Oops, unable to login
                 output("-> Login failed: \"" + message + "\" and " + left + " tries left before being banned for 6 hours !", "error");
@@ -192,19 +193,19 @@ namespace Jackett.Common.Indexers
         /// <returns>Releases</returns>
         protected override async Task<IEnumerable<ReleaseInfo>> PerformQuery(TorznabQuery query)
         {
-            TimeZoneInfo.TransitionTime startTransition = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 3, 0, 0), 3, 5, DayOfWeek.Sunday);
-            TimeZoneInfo.TransitionTime endTransition = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 4, 0, 0), 10, 5, DayOfWeek.Sunday);
-            TimeSpan delta = new TimeSpan(1, 0, 0);
-            TimeZoneInfo.AdjustmentRule adjustment = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(new DateTime(1999, 10, 1), DateTime.MaxValue.Date, delta, startTransition, endTransition);
+            var startTransition = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 3, 0, 0), 3, 5, DayOfWeek.Sunday);
+            var endTransition = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 4, 0, 0), 10, 5, DayOfWeek.Sunday);
+            var delta = new TimeSpan(1, 0, 0);
+            var adjustment = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(new DateTime(1999, 10, 1), DateTime.MaxValue.Date, delta, startTransition, endTransition);
             TimeZoneInfo.AdjustmentRule[] adjustments = { adjustment };
-            TimeZoneInfo FranceTz = TimeZoneInfo.CreateCustomTimeZone("W. Europe Standard Time", new TimeSpan(1, 0, 0), "(GMT+01:00) W. Europe Standard Time", "W. Europe Standard Time", "W. Europe DST Time", adjustments);
+            var FranceTz = TimeZoneInfo.CreateCustomTimeZone("W. Europe Standard Time", new TimeSpan(1, 0, 0), "(GMT+01:00) W. Europe Standard Time", "W. Europe Standard Time", "W. Europe DST Time", adjustments);
 
             var releases = new List<ReleaseInfo>();
-            var torrentRowList = new List<CQ>();
+            var qRowList = new List<IElement>();
             var searchTerm = query.GetQueryString();
             var searchUrl = SearchUrl;
-            int nbResults = 0;
-            int pageLinkCount = 0;
+            var nbResults = 0;
+            var pageLinkCount = 0;
 
             // Check cache first so we don't query the server (if search term used or not in dev mode)
             if (!DevMode && !string.IsNullOrEmpty(searchTerm))
@@ -225,27 +226,26 @@ namespace Jackett.Common.Indexers
             var request = buildQuery(searchTerm, query, searchUrl);
 
             // Getting results & Store content
-            fDom = await queryExec(request);
+            var parser = new HtmlParser();
+            var dom = parser.ParseDocument(await queryExec(request));
 
             try
             {
                 // Find torrent rows
-                var firstPageRows = findTorrentRows();
+                var firstPageRows = findTorrentRows(dom);
 
                 // Add them to torrents list
-                torrentRowList.AddRange(firstPageRows.Select(fRow => fRow.Cq()));
+                qRowList.AddRange(firstPageRows);
 
                 // Check if there are pagination links at bottom
-                Boolean pagination = (fDom[".linkbox > a"].Length != 0);
-
-                // If pagination available
-                if (pagination)
+                var qPagination = dom.QuerySelectorAll(".linkbox > a");
+                if (qPagination.Length > 0)
                 {
                     // Calculate numbers of pages available for this search query (Based on number results and number of torrents on first page)
-                    pageLinkCount = ParseUtil.CoerceInt(Regex.Match(fDom[".linkbox > a"].Last().Attr("href").ToString(), @"\d+").Value);
+                    pageLinkCount = ParseUtil.CoerceInt(Regex.Match(qPagination.Last().GetAttribute("href").ToString(), @"\d+").Value);
 
                     // Calculate average number of results (based on torrents rows lenght on first page)
-                    nbResults = firstPageRows.Count() * pageLinkCount;
+                    nbResults = firstPageRows.Length * pageLinkCount;
                 }
                 else
                 {
@@ -253,7 +253,7 @@ namespace Jackett.Common.Indexers
                     if (firstPageRows.Length >= 1)
                     {
                         // Retrieve total count on our alone page
-                        nbResults = firstPageRows.Count();
+                        nbResults = firstPageRows.Length;
                         pageLinkCount = 1;
                     }
                     else
@@ -270,7 +270,7 @@ namespace Jackett.Common.Indexers
                 if (!string.IsNullOrWhiteSpace(query.GetQueryString()) && pageLinkCount > 1)
                 {
                     // Starting with page #2
-                    for (int i = 2; i <= Math.Min(Int32.Parse(ConfigData.Pages.Value), pageLinkCount); i++)
+                    for (var i = 2; i <= Math.Min(int.Parse(ConfigData.Pages.Value), pageLinkCount); i++)
                     {
                         output("\nProcessing page #" + i);
 
@@ -281,69 +281,72 @@ namespace Jackett.Common.Indexers
                         var pageRequest = buildQuery(searchTerm, query, searchUrl, i);
 
                         // Getting results & Store content
-                        fDom = await queryExec(pageRequest);
+                        parser = new HtmlParser();
+                        dom = parser.ParseDocument(await queryExec(pageRequest));
 
                         // Process page results
-                        var additionalPageRows = findTorrentRows();
+                        var additionalPageRows = findTorrentRows(dom);
 
                         // Add them to torrents list
-                        torrentRowList.AddRange(additionalPageRows.Select(fRow => fRow.Cq()));
+                        qRowList.AddRange(additionalPageRows);
                     }
                 }
 
                 // Loop on results
-                foreach (CQ tRow in torrentRowList)
+                foreach (var row in qRowList)
                 {
                     output("\n=>> Torrent #" + (releases.Count + 1));
 
                     // ID
-                    int id = ParseUtil.CoerceInt(Regex.Match(tRow.Find("td:eq(1) > a").Attr("href").ToString(), @"\d+").Value);
+                    var id = ParseUtil.CoerceInt(Regex.Match(row.QuerySelector("td:nth-of-type(2) > a").GetAttribute("href"), @"\d+").Value);
                     output("ID: " + id);
 
                     // Release Name
-                    string name = tRow.Find("td:eq(1) > a").Text();
+                    var name = row.QuerySelector("td:nth-of-type(2) > a").TextContent;
+                    //issue #3847 replace multi keyword
+                    if (!string.IsNullOrEmpty(ReplaceMulti))
+                    {
+                        var regex = new Regex("(?i)([\\.\\- ])MULTI([\\.\\- ])");
+                        name = regex.Replace(name, "$1" + ReplaceMulti + "$2");
+                    }
                     output("Release: " + name);
 
                     // Category
-                    string categoryID = tRow.Find("td:eq(0) > a").Attr("href").Replace("torrents.php?cat[]=", String.Empty);
-                    var newznab = MapTrackerCatToNewznab(categoryID);
-                    output("Category: " + MapTrackerCatToNewznab(categoryID).First().ToString() + " (" + categoryID + ")");
+                    var categoryId = row.QuerySelector("td:nth-of-type(1) > a").GetAttribute("href").Replace("torrents.php?cat[]=", string.Empty);
+                    var newznab = MapTrackerCatToNewznab(categoryId);
+                    output("Category: " + MapTrackerCatToNewznab(categoryId).First().ToString() + " (" + categoryId + ")");
 
                     // Seeders
-                    int seeders = ParseUtil.CoerceInt(Regex.Match(tRow.Find("td:eq(5)").Text(), @"\d+").Value);
+                    var seeders = ParseUtil.CoerceInt(Regex.Match(row.QuerySelector("td:nth-of-type(6)").TextContent, @"\d+").Value);
                     output("Seeders: " + seeders);
 
                     // Leechers
-                    int leechers = ParseUtil.CoerceInt(Regex.Match(tRow.Find("td:eq(6)").Text(), @"\d+").Value);
+                    var leechers = ParseUtil.CoerceInt(Regex.Match(row.QuerySelector("td:nth-of-type(7)").TextContent, @"\d+").Value);
                     output("Leechers: " + leechers);
 
                     // Completed
-                    int completed = ParseUtil.CoerceInt(Regex.Match(tRow.Find("td:eq(5)").Text(), @"\d+").Value);
+                    var completed = ParseUtil.CoerceInt(Regex.Match(row.QuerySelector("td:nth-of-type(6)").TextContent, @"\d+").Value);
                     output("Completed: " + completed);
 
                     // Size
-                    string sizeStr = tRow.Find("td:eq(4)").Text().Replace("Go", "gb").Replace("Mo", "mb").Replace("Ko", "kb");
-                    long size = ReleaseInfo.GetBytes(sizeStr);
+                    var sizeStr = row.QuerySelector("td:nth-of-type(5)").TextContent.Replace("Go", "gb").Replace("Mo", "mb").Replace("Ko", "kb");
+                    var size = ReleaseInfo.GetBytes(sizeStr);
                     output("Size: " + sizeStr + " (" + size + " bytes)");
 
                     // Publish DateToString
-                    var datestr = tRow.Find("span.time").Attr("title");
+                    var datestr = row.QuerySelector("span.time").GetAttribute("title");
                     var dateLocal = DateTime.SpecifyKind(DateTime.ParseExact(datestr, "MMM dd yyyy, HH:mm", CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
                     var date = TimeZoneInfo.ConvertTimeToUtc(dateLocal, FranceTz);
                     output("Released on: " + date);
 
                     // Torrent Details URL
-                    Uri detailsLink = new Uri(TorrentDescriptionUrl + id);
-                    output("Details: " + detailsLink.AbsoluteUri);
-
-                    // Torrent Comments URL
-                    Uri commentsLink = new Uri(TorrentCommentUrl + id);
-                    output("Comments Link: " + commentsLink.AbsoluteUri);
+                    var details = new Uri(DetailsUrl + id);
+                    output("Details: " + details.AbsoluteUri);
 
                     // Torrent Download URL
                     Uri downloadLink = null;
-                    string link = tRow.Find("td:eq(3) > a").Attr("href");
-                    if (!String.IsNullOrEmpty(link))
+                    var link = row.QuerySelector("td:nth-of-type(4) > a").GetAttribute("href");
+                    if (!string.IsNullOrEmpty(link))
                     {
                         // Download link available
                         downloadLink = new Uri(SiteLink + link);
@@ -357,27 +360,27 @@ namespace Jackett.Common.Indexers
                     }
 
                     // Freeleech
-                    int downloadVolumeFactor = 1;
-                    if (tRow.Find("img[alt=\"Freeleech\"]").Length >= 1)
+                    var downloadVolumeFactor = 1;
+                    if (row.QuerySelector("img[alt=\"Freeleech\"]") != null)
                     {
                         downloadVolumeFactor = 0;
                         output("FreeLeech =)");
                     }
 
                     // Building release infos
-                    var release = new ReleaseInfo()
+                    var release = new ReleaseInfo
                     {
-                        Category = MapTrackerCatToNewznab(categoryID.ToString()),
+                        Category = MapTrackerCatToNewznab(categoryId),
                         Title = name,
                         Seeders = seeders,
                         Peers = seeders + leechers,
-                        MinimumRatio = 1,
-                        MinimumSeedTime = 172800,
                         PublishDate = date,
                         Size = size,
-                        Guid = detailsLink,
-                        Comments = commentsLink,
+                        Guid = details,
+                        Details = details,
                         Link = downloadLink,
+                        MinimumRatio = 1,
+                        MinimumSeedTime = 172800, // 48 hours
                         UploadVolumeFactor = 1,
                         DownloadVolumeFactor = downloadVolumeFactor
                     };
@@ -404,7 +407,7 @@ namespace Jackett.Common.Indexers
         private string buildQuery(string term, TorznabQuery query, string url, int page = 0)
         {
             var parameters = new NameValueCollection();
-            List<string> categoriesList = MapTorznabCapsToTrackers(query);
+            var categoriesList = MapTorznabCapsToTrackers(query);
             string categories = null;
 
             // Check if we are processing a new page
@@ -415,7 +418,7 @@ namespace Jackett.Common.Indexers
             }
 
             // Loop on Categories needed
-            foreach (string category in categoriesList)
+            foreach (var category in categoriesList)
             {
                 // If last, build !
                 if (categoriesList.Last() == category)
@@ -457,9 +460,9 @@ namespace Jackett.Common.Indexers
         /// </summary>
         /// <param name="request">URL created by Query Builder</param>
         /// <returns>Results from query</returns>
-        private async Task<String> queryExec(string request)
+        private async Task<string> queryExec(string request)
         {
-            String results = null;
+            string results = null;
 
             // Switch in we are in DEV mode with Hard Drive Cache or not
             if (DevMode && CacheMode)
@@ -480,9 +483,9 @@ namespace Jackett.Common.Indexers
         /// </summary>
         /// <param name="request">URL created by Query Builder</param>
         /// <returns>Results from query</returns>
-        private async Task<String> queryCache(string request)
+        private async Task<string> queryCache(string request)
         {
-            String results;
+            string results;
 
             // Create Directory if not exist
             System.IO.Directory.CreateDirectory(Directory);
@@ -491,10 +494,10 @@ namespace Jackett.Common.Indexers
             cleanCacheStorage();
 
             // File Name
-            string fileName = StringUtil.HashSHA1(request) + ".json";
+            var fileName = StringUtil.HashSHA1(request) + ".json";
 
             // Create fingerprint for request
-            string file = Path.Combine(Directory, fileName);
+            var file = Path.Combine(Directory, fileName);
 
             // Checking modes states
             if (File.Exists(file))
@@ -503,10 +506,10 @@ namespace Jackett.Common.Indexers
                 output("Loading results from hard drive cache ..." + fileName);
                 try
                 {
-                    using (StreamReader fileReader = File.OpenText(file))
+                    using (var fileReader = File.OpenText(file))
                     {
-                        JsonSerializer serializer = new JsonSerializer();
-                        results = (String)serializer.Deserialize(fileReader, typeof(String));
+                        var serializer = new JsonSerializer();
+                        results = (string)serializer.Deserialize(fileReader, typeof(string));
                     }
                 }
                 catch (Exception e)
@@ -522,9 +525,9 @@ namespace Jackett.Common.Indexers
 
                 // Cached file didn't exist for our query, writing it right now !
                 output("Writing results to hard drive cache ..." + fileName);
-                using (StreamWriter fileWriter = File.CreateText(file))
+                using (var fileWriter = File.CreateText(file))
                 {
-                    JsonSerializer serializer = new JsonSerializer();
+                    var serializer = new JsonSerializer();
                     serializer.Serialize(fileWriter, results);
                 }
             }
@@ -536,19 +539,17 @@ namespace Jackett.Common.Indexers
         /// </summary>
         /// <param name="request">URL created by Query Builder</param>
         /// <returns>Results from query</returns>
-        private async Task<String> queryTracker(string request)
+        private async Task<string> queryTracker(string request)
         {
-            WebClientStringResult results = null;
-
             // Cache mode not enabled or cached file didn't exist for our query
             output("\nQuerying tracker for results....");
 
             // Request our first page
             latencyNow();
-            results = await RequestStringWithCookiesAndRetry(request, null, null, emulatedBrowserHeaders);
+            var results = await RequestWithCookiesAndRetryAsync(request, headers: emulatedBrowserHeaders);
 
             // Return results from tracker
-            return results.Content;
+            return results.ContentString;
         }
 
         /// <summary>
@@ -614,7 +615,7 @@ namespace Jackett.Common.Indexers
             {
                 // Generate a random value in our range
                 var random = new Random(DateTime.Now.Millisecond);
-                int waiting = random.Next(Convert.ToInt32(ConfigData.LatencyStart.Value), Convert.ToInt32(ConfigData.LatencyEnd.Value));
+                var waiting = random.Next(Convert.ToInt32(ConfigData.LatencyStart.Value), Convert.ToInt32(ConfigData.LatencyEnd.Value));
                 output("\nLatency Faker => Sleeping for " + waiting + " ms...");
 
                 // Sleep now...
@@ -625,13 +626,9 @@ namespace Jackett.Common.Indexers
         /// <summary>
         /// Find torrent rows in search pages
         /// </summary>
-        /// <returns>JQuery Object</returns>
-        private CQ findTorrentRows()
-        {
-            // Return all occurencis of torrents found
-            return fDom[".torrent_table > tbody > tr"].Not(".colhead");
-        }
-
+        /// <returns>List of rows</returns>
+        private IHtmlCollection<IElement> findTorrentRows(IHtmlDocument dom) =>
+            dom.QuerySelectorAll(".torrent_table > tbody > tr:not(.colhead)");
 
         /// <summary>
         /// Output message for logging or developpment (console)

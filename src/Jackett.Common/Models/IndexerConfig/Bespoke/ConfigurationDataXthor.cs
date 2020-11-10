@@ -1,10 +1,14 @@
-﻿namespace Jackett.Common.Models.IndexerConfig.Bespoke
+using System.Diagnostics.CodeAnalysis;
+
+namespace Jackett.Common.Models.IndexerConfig.Bespoke
 {
-    class ConfigurationDataXthor : ConfigurationData
+    [ExcludeFromCodeCoverage]
+    internal class ConfigurationDataXthor : ConfigurationData
     {
         public DisplayItem CredentialsWarning { get; private set; }
         public StringItem PassKey { get; set; }
         public DisplayItem PagesWarning { get; private set; }
+        public StringItem Accent { get; set; }
         public BoolItem Freeleech { get; private set; }
         public StringItem ReplaceMulti { get; private set; }
         public BoolItem EnhancedAnime { get; private set; }
@@ -13,12 +17,15 @@
         public BoolItem HardDriveCache { get; private set; }
         public StringItem HardDriveCacheKeepTime { get; private set; }
 
+        public BoolItem Vostfr { get; private set; }
+
         public ConfigurationDataXthor()
             : base()
         {
             CredentialsWarning = new DisplayItem("<b>Credentials Configuration</b> (<i>Private Tracker</i>),<br /><br /> <ul><li><b>PassKey</b> is your private key on your account</li></ul>") { Name = "Credentials" };
             PassKey = new StringItem { Name = "PassKey", Value = "" };
-            PagesWarning = new DisplayItem("<b>Preferences Configuration</b> (<i>Tweak your search settings</i>),<br /><br /> <ul><li><b>Freeleech Only</b> let you search <u>only</u> for torrents which are marked Freeleech.</li><b>Replace MULTI</b>, replace multi keyword in the resultset (leave empty  to deactivate)<li></li><li><b>Enhanced anime search</b>, Enhance sonarr compatibility with Xthor. Only effective on requests with the <u>TVAnime Torznab category</u>.</li></ul>") { Name  = "Preferences" };
+            Accent = new StringItem { Name = "Accent", Value = "" };
+            PagesWarning = new DisplayItem("<b>Preferences Configuration</b> (<i>Tweak your search settings</i>),<br /><br /> <ul><li><b>Freeleech Only</b> let you search <u>only</u> for torrents which are marked Freeleech.</li><li><b>Replace MULTI</b>, replace multi keyword in the resultset (leave empty  to deactivate)</li><li><b>Enhanced anime search</b>, Enhance sonarr compatibility with Xthor. Only effective on requests with the <u>TVAnime Torznab category</u>.</li><li><b>Accent</b> is the french accent you want. 1 for VFF (Truefrench) 2 for VFQ (FRENCH, canada). When one is selected, the other will not be searched.</li></ul>") { Name = "Preferences" };
             Freeleech = new BoolItem() { Name = "Freeleech Only (Optional)", Value = false };
             ReplaceMulti = new StringItem() { Name = "Replace MULTI", Value = "MULTI.FRENCH" };
             EnhancedAnime = new BoolItem() { Name = "Enhanced anime search", Value = false };
@@ -26,6 +33,8 @@
             DevMode = new BoolItem { Name = "Enable DEV MODE (Developers ONLY)", Value = false };
             HardDriveCache = new BoolItem { Name = "Enable HARD DRIVE CACHE (Developers ONLY)", Value = false };
             HardDriveCacheKeepTime = new StringItem { Name = "Keep Cached files for (ms)", Value = "300000" };
-            }
+            Vostfr = new BoolItem() { Name = "Replace VOSTFR or SUBFRENCH with ENGLISH", Value = false };
+
+        }
     }
 }
